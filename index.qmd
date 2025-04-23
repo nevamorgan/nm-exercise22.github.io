@@ -1,0 +1,10 @@
+---
+title: "ESS330 Daily Assignment 22"
+
+author: "Neva Morgan"
+
+date: last-modified
+
+subtitle: "Lecture 22: Introduction to Time Series Data in 'R'"
+---
+
