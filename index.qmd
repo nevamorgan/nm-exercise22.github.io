@@ -5,6 +5,233 @@ author: "Neva Morgan"
 
 date: last-modified
 
-subtitle: "Lecture 22: Introduction to Time Series Data in 'R'"
+subtitle: "Lecture 22: Introduction to Time Series Forecasting in 'R'"
 ---
 
+# **Objective**:
+
+Use the Poudre River set to understand new methods for analyzing time series forecasting from the modeltime package.
+
+OMG THE LIBRARIES ARE BUILDING!
+
+```{r}
+library(modeltime)
+library(tidyverse)
+library(tidymodels)
+library(timeSeries)
+library(ggplot2)
+library(tsibble)
+library(lubridate)
+library(forecast)
+library(feasts)
+library(zoo)
+library(xts)
+library(fable)
+library(prophet)
+library(purrr)
+library(timetk)
+library(caret)
+library(rsample)
+```
+
+Re-reading in data from Assignment 21:
+
+```{r}
+library(dataRetrieval)
+
+# Example: Cache la Poudre River at Mouth (USGS site 06752260)
+poudre_flow <- readNWISdv(siteNumber = "06752260",
+                          parameterCd = "00060",
+                          startDate = "2013-01-01",
+                          endDate = "2023-12-31") |>
+  renameNWISColumns() |>
+  mutate(Date = yearmonth(Date)) |>
+  mutate(Date = ym(Date)) |>  
+  group_by(Date) |>
+  summarize(Flow = mean(Flow)) |> 
+  ungroup() 
+
+
+```
+
+1.  Create a Time Series Split:
+
+```{r}
+# Making the Tibble of Poudre Flow - Time Series Split:
+pf_tbl <- as_tibble(poudre_flow, index = Date)
+
+splits <- time_series_split(pf_tbl, assess = "12 months", cumulative = TRUE)
+
+training <- training(splits)
+testing <- testing(splits)
+```
+
+2.  Specifying my Models:
+
+```{r}
+mods <- list(
+  arima_reg() |>  set_engine("auto_arima"),
+  
+  arima_boost(min_n = 2, learn_rate = 0.015) |> set_engine(engine = "auto_arima_xgboost"),
+  
+  prophet_reg() |> set_engine("prophet"),
+  
+  prophet_boost() |> set_engine("prophet_xgboost"),
+  
+  # Exponential Smoothing State Space model
+  exp_smoothing() |> set_engine(engine = "ets"),
+  
+  # Multivariate Adaptive Regression Spline model
+  mars(mode = "regression") |> set_engine("earth") 
+)
+
+```
+
+3.  Fitting the Models
+
+```{r}
+library(earth)
+models <- map(mods, ~ fit(.x, Flow ~ Date, data = training))
+
+```
+
+4.  Building the Modeltime Table
+
+```{r}
+(models_tbl <- as_modeltime_table(models))
+
+```
+
+5.  Calibrating the Models
+
+```{r}
+(calibration_table <- modeltime_calibrate(models_tbl, testing, quiet = FALSE))
+```
+
+6.  Accuracy
+
+```{r}
+modeltime_accuracy(calibration_table) |>
+  arrange(mae)
+```
+
+7.  Re-Reading data into Actual Forecast:
+
+```{r}
+glimpse(testing)
+glimpse(pf_tbl)
+
+#Reading in actual data
+
+pf_future <- readNWISdv(siteNumber = "06752260",
+                         parameterCd = "00060",
+                         startDate = "2024-01-01",
+                         endDate = "2025-04-01") |> 
+  renameNWISColumns() |>
+  mutate(Date = floor_date(Date, "month"),
+         Flow = as.numeric(Flow)) |> 
+  group_by(Date) |> 
+  summarise(Flow = mean(Flow)) |> 
+  ungroup() 
+```
+
+8.  Forecasting
+
+```{r}
+#Previous data
+forecast <- modeltime_forecast(
+  object = calibration_table,
+  h = "12 months",
+  actual_data = pf_tbl
+)
+
+plot_modeltime_forecast(forecast)
+
+
+modeltime_forecast(
+  object = calibration_table,
+  h = "12 months",
+  actual_data = pf_tbl
+)
+
+```
+
+9.  Visualizing
+
+```{r}
+plot_modeltime_forecast(forecast)
+```
+
+10. Refit to Full Dataset & Forecast Forward
+
+```{r}
+refit_tbl <- calibration_table |>
+  modeltime_refit(data = pf_tbl)
+
+refit_tbl |>
+  modeltime_forecast(h = "12 months", actual_data = pf_tbl) |>
+  plot_modeltime_forecast()
+```
+
+11. RERUN THIS THING:
+
+```{r}
+# New Data
+future_forecast <- refit_tbl |>
+  modeltime_forecast(h = "12 months", actual_data = pf_future)
+
+glimpse(future_forecast)
+
+refit_tbl <- calibration_table |>
+  modeltime_refit(data = pf_tbl)
+```
+
+12. Merging Predicted and Actual:
+
+I was having serious issues with trying to find .model_desc from my forecast,
+I ended up just providing what I have, in my graph below prophet does exist, but
+this is the code and data I was trying to provide with the subsequent error, although
+.model_desc WAS DEFNINITELY IN FUTURE FORECAST AND COMPARE DF!
+> compare_df <- future_forecast |>
++   filter(.model_desc %in% c("UPDATE: ARIMA(0,0,2)(0,1,1)[12]", "PROPHET")) |>
++   select(Date = .index, .model_desc, .value) |>
++   left_join(pf_future, by = "Date") |>
++   rename(Predicted = .value, Observed = Flow)
+Error: object '.model_desc' not found
+
+```{r}
+compare_df <- future_forecast |>
+  select(Date = .index, .model_desc, .value) |>
+  left_join(pf_future, by = "Date") |>
+  rename(Predicted = .value, Observed = Flow)
+
+
+```
+
+13. Calculating R-sq
+
+```{r}
+
+lm_model <- lm(Observed ~ Predicted, data = compare_df)
+
+summary(lm_model)$r.squared
+```
+
+R-squared value = 0.693...
+
+This is a very good R-squared value, indicating that the predicted values are closr to the actual values, however, there is still some uncertainty that we can see with the data that was predicted, since the value isn't at 1.
+
+14. Plotting the Predicted and Observed
+
+```{r}
+ggplot(compare_df, aes(x = Predicted, y = Observed)) +
+  geom_point(aes(color = .model_desc)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray40") + 
+  geom_smooth(method = "lm", se = FALSE, color = "black") + 
+  facet_wrap(~ .model_desc) +
+  labs(title = "Predicted vs Observed Streamflow",
+       x = "Predicted Monthly Flow (cfs)",
+       y = "Observed Monthly Flow (cfs)",
+       subtitle = "ESS330 A-22 | Neva Morgan") +
+  theme_minimal()
+```
